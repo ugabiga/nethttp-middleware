@@ -4,6 +4,7 @@
 package nethttpmiddleware
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log"
@@ -14,6 +15,10 @@ import (
 	"github.com/getkin/kin-openapi/openapi3filter"
 	"github.com/getkin/kin-openapi/routers"
 	"github.com/getkin/kin-openapi/routers/gorillamux"
+)
+
+const (
+	ContextKey = "oapi-codegen/ctx-context"
 )
 
 // ErrorHandler is called when there is an error in validation
@@ -50,8 +55,10 @@ func OapiRequestValidatorWithOptions(swagger *openapi3.T, options *Options) func
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 
+			r = r.WithContext(context.WithValue(r.Context(), ContextKey, context.Background()))
+
 			// validate request
-			if statusCode, err := validateRequest(r, router, options); err != nil {
+			if statusCode, err := ValidateRequestFromContext(r, router, options); err != nil {
 				if options != nil && options.ErrorHandler != nil {
 					options.ErrorHandler(w, err.Error(), statusCode)
 				} else {
@@ -133,4 +140,63 @@ func getMultiErrorHandlerFromOptions(options *Options) MultiErrorHandler {
 // methods defined on the options.
 func defaultMultiErrorHandler(me openapi3.MultiError) (int, error) {
 	return http.StatusBadRequest, me
+}
+
+func ValidateRequestFromContext(r *http.Request, router routers.Router, options *Options) (int, error) {
+
+	// Find route
+	route, pathParams, err := router.FindRoute(r)
+	if err != nil {
+		return http.StatusNotFound, err // We failed to find a matching route for the request.
+	}
+
+	//requestContext := context.Background()
+	//r = r.WithContext(context.WithValue(r.Context(), ContextKey, requestContext))
+
+	// Validate request
+	requestValidationInput := &openapi3filter.RequestValidationInput{
+		Request:    r,
+		PathParams: pathParams,
+		Route:      route,
+	}
+
+	if options != nil {
+		requestValidationInput.Options = &options.Options
+	}
+
+	if err := openapi3filter.ValidateRequest(r.Context(), requestValidationInput); err != nil {
+		me := openapi3.MultiError{}
+		if errors.As(err, &me) {
+			errFunc := getMultiErrorHandlerFromOptions(options)
+			return errFunc(me)
+		}
+
+		switch e := err.(type) {
+		case *openapi3filter.RequestError:
+			// We've got a bad request
+			// Split up the verbose error by lines and return the first one
+			// openapi errors seem to be multi-line with a decent message on the first
+			errorLines := strings.Split(e.Error(), "\n")
+			return http.StatusBadRequest, fmt.Errorf(errorLines[0])
+		case *openapi3filter.SecurityRequirementsError:
+			return http.StatusUnauthorized, err
+		default:
+			// This should never happen today, but if our upstream code changes,
+			// we don't want to crash the server, so handle the unexpected error.
+			return http.StatusInternalServerError, fmt.Errorf("error validating route: %s", err.Error())
+		}
+	}
+
+	return http.StatusOK, nil
+}
+
+func GetContextFromRequest(r *http.Request) context.Context {
+	return r.Context().Value(ContextKey).(context.Context)
+}
+func SetContextFromRequest(r *http.Request, key, val any) {
+	c := r.Context().Value(ContextKey).(context.Context)
+
+	//r = r.WithContext(context.WithValue(r.Context(), key, val))
+	//r.Context().mu.Lock()
+	//log.Println("SetContextFromRequest", key, val)
 }

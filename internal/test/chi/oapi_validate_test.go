@@ -49,11 +49,48 @@ func TestOapiRequestValidator(t *testing.T) {
 
 	r := chi.NewRouter()
 
+	//Options
+	options := middleware.Options{
+		Options: openapi3filter.Options{
+			AuthenticationFunc: func(ctx context.Context, input *openapi3filter.AuthenticationInput) error {
+				//cCtx := middleware.GetContextFromRequest(input.RequestValidationInput.Request)
+				//assert.NotNil(t, cCtx)
+
+				//cCtx = context.WithValue(cCtx, "test", "test")
+
+				middleware.SetContextFromRequest(
+					input.RequestValidationInput.Request,
+					"test",
+					"test",
+				)
+
+				for _, s := range input.Scopes {
+					if s == "someScope" {
+						return nil
+					}
+					if s == "unauthorized" {
+						return errors.New("unauthorized")
+					}
+				}
+				return errors.New("forbidden")
+			},
+		},
+	}
+
 	// register middleware
-	r.Use(middleware.OapiRequestValidator(swagger))
+	r.Use(middleware.OapiRequestValidatorWithOptions(swagger, &options))
+	r.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			cCtx := middleware.GetContextFromRequest(r)
+			assert.NotNil(t, cCtx)
+			assert.Equal(t, "test", cCtx.Value("test"))
+			next.ServeHTTP(w, r)
+		})
+	})
 
 	// basic cases
 	testRequestValidatorBasicFunctions(t, r)
+
 }
 
 func TestOapiRequestValidatorWithOptionsMultiError(t *testing.T) {
@@ -333,6 +370,18 @@ func TestOapiRequestValidatorWithOptions(t *testing.T) {
 func testRequestValidatorBasicFunctions(t *testing.T, r *chi.Mux) {
 
 	called := false
+
+	r.Get("/protected_resource_401", func(w http.ResponseWriter, r *http.Request) {
+		called = true
+	})
+	// Call a protected function without credentials
+	{
+		_ = doGet(t, r, "http://deepmap.ai/protected_resource_401")
+		//assert.Equal(t, http.StatusBadRequest, rec.Code)
+		//assert.Equal(t, "test: error in openapi3filter.SecurityRequirementsError: security requirements failed: unauthorized", rec.Body.String())
+		//assert.False(t, called, "Handler should not have been called")
+		called = false
+	}
 
 	// Install a request handler for /resource. We want to make sure it doesn't
 	// get called.
